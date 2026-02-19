@@ -26,7 +26,7 @@ app.get('/health', async () => ({
 
 // ─── Data routes ─────────────────────────────────────────────────────────────
 
-await app.register(ipmaRoutes)
+await app.register(ipmaRoutes, { prefix: '/ipma' })
 
 // ─── Cron: forecasts every 6h, warnings every 30min ─────────────────────────
 
