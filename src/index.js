@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 import mongoose from 'mongoose'
 import cron from 'node-cron'
 import { ipmaRoutes } from './routes.js'
+import { metaRoutes } from './meta.js'
 import { syncForecasts, syncWarnings } from './sync.js'
 
 const SERVICE_NAME = 'connector-ipma'
@@ -27,6 +28,7 @@ app.get('/health', async () => ({
 
 // ─── Data routes ─────────────────────────────────────────────────────────────
 
+await app.register(metaRoutes)
 await app.register(ipmaRoutes, { prefix: '/ipma' })
 
 // ─── Cron: forecasts every 6h, warnings every 30min ─────────────────────────
