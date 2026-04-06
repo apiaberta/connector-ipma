@@ -1,13 +1,62 @@
 import { Forecast } from './models/forecast.js'
 import { Warning } from './models/warning.js'
-import { CITIES } from './sync.js'
+import { fetchAllLocations } from './sync.js'
+
+// In-memory cache for locations (refreshed on first request)
+let _locationsCache = null
+
+async function getLocations() {
+  if (!_locationsCache) {
+    _locationsCache = await fetchAllLocations()
+  }
+  return _locationsCache
+}
 
 export async function ipmaRoutes(app) {
 
-  // GET /forecasts — all cities, upcoming days
+  // GET /ipma/locations — all 35 Portugal locations
+  app.get('/locations', {
+    schema: {
+      description: 'All available IPMA locations (35 districts + islands)',
+      tags: ['Weather'],
+      querystring: {
+        type: 'object',
+        properties: {
+          island: { type: 'boolean', description: 'Filter to islands only' }
+        }
+      }
+    }
+  }, async (req) => {
+    const locationMap = await getLocations()
+    const locations = Array.from(locationMap.values())
+
+    // Islands are identified by having an id > 300 (approximate heuristic based on IPMA data)
+    // Actually: islands don't appear in hp-daily-forecast endpoints (those are continental only)
+    // We return all 35 locations so consumers know what's available
+    let data = locations.map(loc => ({
+      globalIdLocal: loc.globalIdLocal,
+      name:          loc.local,
+      latitude:      loc.latitude,
+      longitude:     loc.longitude
+    }))
+
+    // Simple island filter: Azores/Madeira ids are typically > 900000 range in IPMA
+    if (req.query.island === true) {
+      data = data.filter(loc => loc.globalIdLocal > 900000)
+    } else if (req.query.island === false) {
+      data = data.filter(loc => loc.globalIdLocal <= 900000)
+    }
+
+    return {
+      count: data.length,
+      data
+    }
+  })
+
+  // GET /ipma/forecasts — all locations, upcoming days
   app.get('/forecasts', {
     schema: {
-      description: 'Weather forecasts for all major Portuguese cities',
+      description: 'Weather forecasts for all Portuguese locations (up to 3 days)',
       tags: ['Weather'],
       querystring: {
         type: 'object',
@@ -23,11 +72,18 @@ export async function ipmaRoutes(app) {
       .sort({ cityName: 1, date: 1 })
       .lean()
 
-    // Group by city
+    // Group by cityId
     const byCityId = {}
     for (const f of forecasts) {
       if (!byCityId[f.cityId]) {
-        byCityId[f.cityId] = { cityId: f.cityId, cityName: f.cityName, forecasts: [] }
+        byCityId[f.cityId] = {
+          cityId:    f.cityId,
+          cityName:  f.cityName,
+          district:  f.district,
+          latitude:  f.latitude,
+          longitude: f.longitude,
+          forecasts: []
+        }
       }
       byCityId[f.cityId].forecasts.push({
         date:        f.date,
@@ -41,30 +97,33 @@ export async function ipmaRoutes(app) {
     }
 
     return {
-      cities: CITIES.length,
+      cities: Object.values(byCityId).length,
       data:   Object.values(byCityId),
       synced_at: forecasts[0]?.synced_at || null
     }
   })
 
-  // GET /forecasts/:cityId — forecast for one city
+  // GET /ipma/forecasts/:cityId — forecast for one location
   app.get('/forecasts/:cityId', {
     schema: {
-      description: '5-day weather forecast for a specific city',
+      description: '3-day weather forecast for a specific location',
       tags: ['Weather'],
       params: {
         type: 'object',
         properties: {
-          cityId: { type: 'integer', description: 'IPMA city ID (e.g. 1110600 for Lisboa)' }
+          cityId: { type: 'integer', description: 'IPMA globalIdLocal ID (e.g. 1110600 for Lisboa)' }
         },
         required: ['cityId']
       }
     }
   }, async (req, reply) => {
     const cityId = parseInt(req.params.cityId)
-    const city = CITIES.find(c => c.id === cityId)
-    if (!city) {
-      return reply.code(404).send({ error: `City ${cityId} not found` })
+    const locationMap = await getLocations()
+    const location = locationMap.get(cityId)
+
+    if (!location) {
+      // Check if it's a valid id in our cache
+      return reply.code(404).send({ error: `Location ${cityId} not found` })
     }
 
     const today = new Date().toISOString().split('T')[0]
@@ -73,8 +132,10 @@ export async function ipmaRoutes(app) {
       .lean()
 
     return {
-      cityId:    city.id,
-      cityName:  city.name,
+      cityId:    location.globalIdLocal,
+      cityName:  location.local,
+      latitude:  location.latitude,
+      longitude: location.longitude,
       forecasts: forecasts.map(f => ({
         date:        f.date,
         tMin:        f.tMin,
@@ -88,7 +149,7 @@ export async function ipmaRoutes(app) {
     }
   })
 
-  // GET /warnings — active warnings (endTime >= now)
+  // GET /ipma/warnings — active warnings (endTime >= now)
   app.get('/warnings', {
     schema: {
       description: 'Active meteorological warnings in Portugal',

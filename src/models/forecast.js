@@ -3,6 +3,7 @@ import mongoose from 'mongoose'
 const forecastSchema = new mongoose.Schema({
   cityId:      { type: Number, required: true },
   cityName:    { type: String, required: true },
+  district:    { type: String },
   date:        { type: String, required: true }, // YYYY-MM-DD
   tMin:        Number,
   tMax:        Number,
@@ -10,6 +11,8 @@ const forecastSchema = new mongoose.Schema({
   precipProb:  Number,
   windDir:     String,
   windSpeed:   String,
+  latitude:    Number,
+  longitude:   Number,
   synced_at:   { type: Date, default: Date.now }
 })
 

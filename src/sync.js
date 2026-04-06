@@ -1,6 +1,9 @@
 /**
  * sync.js — IPMA data synchronisation
  * Forecasts: every 6h | Warnings: every 30min
+ *
+ * Locations: all 35 Portugal districts/islands (27 continental + 8 islands)
+ * Forecasts: HP daily forecast endpoints (3-day, all 27 locations per call)
  */
 
 import { Forecast } from './models/forecast.js'
@@ -8,20 +11,6 @@ import { Warning } from './models/warning.js'
 
 const BASE_URL = 'https://api.ipma.pt/open-data'
 const HEADERS  = { 'User-Agent': 'apiaberta.pt/1.0 (open-data connector)' }
-
-export const CITIES = [
-  { id: 1110600, name: 'Lisboa' },
-  { id: 1131200, name: 'Porto' },
-  { id: 1060600, name: 'Faro' },
-  { id: 1030300, name: 'Braga' },
-  { id: 1060200, name: 'Coimbra' }
-]
-
-// Wind direction mapping from IPMA codes
-const WIND_DIR = {
-  0: 'N', 1: 'NE', 2: 'E', 3: 'SE',
-  4: 'S', 5: 'SW', 6: 'W', 7: 'NW', 9: 'Variable'
-}
 
 // Weather description from IPMA idWeatherType
 const WEATHER_TYPES = {
@@ -42,39 +31,94 @@ async function fetchJson(url) {
   return res.json()
 }
 
-export async function syncForecasts(logger) {
-  let total = 0
-  for (const city of CITIES) {
-    try {
-      const url = `${BASE_URL}/forecast/meteorology/cities/daily/${city.id}.json`
-      const data = await fetchJson(url)
-      const days = data.data || []
+/**
+ * Fetch all 35 Portugal locations (distrits + islands) from IPMA.
+ * Returns a Map: globalIdLocal → { id, local, globalIdLocal, latitude, longitude }
+ */
+export async function fetchAllLocations() {
+  const url = `${BASE_URL}/distrits-islands.json`
+  const data = await fetchJson(url)
+  const locations = data.data || []
 
-      for (const day of days) {
+  const map = new Map()
+  for (const loc of locations) {
+    map.set(loc.globalIdLocal, {
+      id:            loc.id,
+      local:         loc.local,
+      globalIdLocal: loc.globalIdLocal,
+      latitude:      loc.latitude,
+      longitude:      loc.longitude
+    })
+  }
+  return map
+}
+
+// Legacy CITIES export — routes now use /locations instead
+export const CITIES = []
+
+/**
+ * Sync 3-day forecasts for all 27 continental locations using HP endpoints.
+ * Each HP endpoint returns ALL locations in one call (27 records).
+ * forecastDate is at the top level of each HP response.
+ */
+export async function syncForecasts(logger) {
+  const locationMap = await fetchAllLocations()
+  logger?.info({ count: locationMap.size }, 'Fetched location metadata')
+
+  // HP endpoints: all 27 continental locations per day, forecastDate at top level
+  const [day0, day1, day2] = await Promise.all([
+    fetchJson(`${BASE_URL}/forecast/meteorology/cities/daily/hp-daily-forecast-day0.json`),
+    fetchJson(`${BASE_URL}/forecast/meteorology/cities/daily/hp-daily-forecast-day1.json`),
+    fetchJson(`${BASE_URL}/forecast/meteorology/cities/daily/hp-daily-forecast-day2.json`)
+  ])
+
+  const dayGroups = [
+    { data: day0.data || [], forecastDate: day0.forecastDate },
+    { data: day1.data || [], forecastDate: day1.forecastDate },
+    { data: day2.data || [], forecastDate: day2.forecastDate }
+  ]
+
+  let total = 0
+  let skipped = 0
+
+  for (const { data: records, forecastDate } of dayGroups) {
+    for (const rec of records) {
+      const location = locationMap.get(rec.globalIdLocal)
+      if (!location) {
+        logger?.warn({ globalIdLocal: rec.globalIdLocal }, 'Location not found in distrits-islands, skipping')
+        skipped++
+        continue
+      }
+
+      try {
         await Forecast.findOneAndUpdate(
-          { cityId: city.id, date: day.forecastDate },
+          { cityId: rec.globalIdLocal, date: forecastDate },
           {
-            cityId:      city.id,
-            cityName:    city.name,
-            date:        day.forecastDate,
-            tMin:        day.tMin != null ? parseFloat(day.tMin) : null,
-            tMax:        day.tMax != null ? parseFloat(day.tMax) : null,
-            description: WEATHER_TYPES[day.idWeatherType] || `Tipo ${day.idWeatherType}`,
-            precipProb:  day.precipitaProb != null ? parseFloat(day.precipitaProb) : null,
-            windDir:     WIND_DIR[day.predWindDir] || day.predWindDir,
-            windSpeed:   day.classWindSpeed != null ? String(day.classWindSpeed) : null,
+            cityId:      rec.globalIdLocal,
+            cityName:    location.local,
+            district:    location.local,
+            date:        forecastDate,
+            tMin:        rec.tMin != null ? parseFloat(rec.tMin) : null,
+            tMax:        rec.tMax != null ? parseFloat(rec.tMax) : null,
+            description: WEATHER_TYPES[rec.idWeatherType] || `Tipo ${rec.idWeatherType}`,
+            precipProb:  rec.precipitaProb != null ? parseFloat(rec.precipitaProb) : null,
+            windDir:     rec.predWindDir || null,  // HP returns string like SE, SW
+            windSpeed:   rec.classWindSpeed != null ? String(rec.classWindSpeed) : null,
+            latitude:    rec.latitude != null ? parseFloat(rec.latitude) : null,
+            longitude:   rec.longitude != null ? parseFloat(rec.longitude) : null,
             synced_at:   new Date()
           },
           { upsert: true, new: true }
         )
         total++
+      } catch (err) {
+        logger?.error({ err, globalIdLocal: rec.globalIdLocal }, 'Failed to upsert forecast record')
       }
-      logger?.info(`Synced ${days.length} forecast days for ${city.name}`)
-    } catch (err) {
-      logger?.error({ err, city: city.name }, 'Failed to sync forecasts for city')
     }
   }
-  return { synced: total }
+
+  logger?.info({ total, skipped }, 'Forecast sync complete')
+  return { synced: total, skipped, locations: locationMap.size }
 }
 
 export async function syncWarnings(logger) {
