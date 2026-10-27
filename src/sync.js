@@ -1,16 +1,25 @@
 /**
  * sync.js — IPMA data synchronisation
- * Forecasts: every 6h | Warnings: every 30min
+ * Forecasts: every 6h | Warnings: every 30min | Seismic: every 10min
  *
  * Locations: all 35 Portugal districts/islands (27 continental + 8 islands)
  * Forecasts: HP daily forecast endpoints (3-day, all 27 locations per call)
+ * Seismic: observation/seismic/{3,7}.json — Açores and Continente+Madeira
  */
 
 import { Forecast } from './models/forecast.js'
 import { Warning } from './models/warning.js'
+import { Earthquake } from './models/earthquake.js'
+import { mapSeismicEvent } from './seismic.js'
 
 const BASE_URL = 'https://api.ipma.pt/open-data'
 const HEADERS  = { 'User-Agent': 'apiaberta.pt/1.0 (open-data connector)' }
+const FETCH_TIMEOUT_MS = 15_000
+
+const SEISMIC_AREAS = [
+  { id: 3, key: 'acores' },
+  { id: 7, key: 'continente' }
+]
 
 // Weather description from IPMA idWeatherType
 const WEATHER_TYPES = {
@@ -25,8 +34,11 @@ const WEATHER_TYPES = {
   '-99': 'Sem informação'
 }
 
-async function fetchJson(url) {
-  const res = await fetch(url, { headers: HEADERS })
+async function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS) {
+  const res = await fetch(url, {
+    headers: HEADERS,
+    signal: AbortSignal.timeout(timeoutMs)
+  })
   if (!res.ok) throw new Error(`HTTP ${res.status} fetching ${url}`)
   return res.json()
 }
@@ -153,4 +165,59 @@ export async function syncWarnings(logger) {
     logger?.error({ err }, 'Failed to sync warnings')
     return { error: err.message }
   }
+}
+
+async function syncSeismicArea(area, logger) {
+  const url = `${BASE_URL}/observation/seismic/${area.id}.json`
+  const payload = await fetchJson(url)
+  const events = payload.data || []
+  const now = new Date()
+  const ops = []
+
+  for (const raw of events) {
+    const mapped = mapSeismicEvent(raw, area.id)
+    if (!mapped) continue
+    ops.push({
+      updateOne: {
+        filter: { event_key: mapped.event_key },
+        update: {
+          $setOnInsert: { first_seen: now },
+          $set: { ...mapped, last_seen: now }
+        },
+        upsert: true
+      }
+    })
+  }
+
+  if (ops.length === 0) return { n: 0, upserted: 0, modified: 0 }
+
+  const result = await Earthquake.bulkWrite(ops, { ordered: false })
+  logger?.info({ area: area.key, n: ops.length }, 'Seismic area sync complete')
+  return {
+    n: ops.length,
+    upserted: result.upsertedCount ?? 0,
+    modified: result.modifiedCount ?? 0
+  }
+}
+
+/**
+ * Fetch both seismic areas independently (one failure must not block the other)
+ * and upsert into the earthquakes collection.
+ */
+export async function syncSeismic(logger) {
+  const totals = { acores: 0, continente: 0, upserted: 0, modified: 0 }
+
+  await Promise.all(SEISMIC_AREAS.map(async (area) => {
+    try {
+      const r = await syncSeismicArea(area, logger)
+      totals[area.key] = r.n
+      totals.upserted += r.upserted
+      totals.modified += r.modified
+    } catch (err) {
+      logger?.error({ err, area: area.key }, 'Seismic area sync failed')
+    }
+  }))
+
+  logger?.info(totals, 'Seismic sync complete')
+  return totals
 }

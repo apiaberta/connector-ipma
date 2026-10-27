@@ -3,7 +3,7 @@ import mongoose from 'mongoose'
 import cron from 'node-cron'
 import { ipmaRoutes } from './routes.js'
 import { metaRoutes } from './meta.js'
-import { syncForecasts, syncWarnings } from './sync.js'
+import { syncForecasts, syncWarnings, syncSeismic } from './sync.js'
 
 const SERVICE_NAME = 'connector-ipma'
 const PORT      = parseInt(process.env.PORT || '3002')
@@ -22,7 +22,7 @@ const app = Fastify({
 app.get('/health', async () => ({
   status:    'ok',
   service:   SERVICE_NAME,
-  version:   '1.0.0',
+  version:   '1.1.0',
   timestamp: new Date().toISOString()
 }))
 
@@ -31,7 +31,7 @@ app.get('/health', async () => ({
 await app.register(metaRoutes)
 await app.register(ipmaRoutes, { prefix: '/ipma' })
 
-// ─── Cron: forecasts every 6h, warnings every 30min ─────────────────────────
+// ─── Cron: forecasts every 6h, warnings every 30min, seismic every 10min ────
 
 cron.schedule('0 */6 * * *', async () => {
   app.log.info('Cron: syncing IPMA forecasts...')
@@ -53,6 +53,16 @@ cron.schedule('*/30 * * * *', async () => {
   }
 })
 
+cron.schedule('*/10 * * * *', async () => {
+  app.log.info('Cron: syncing IPMA seismic events...')
+  try {
+    const r = await syncSeismic(app.log)
+    app.log.info({ r }, 'Seismic sync complete')
+  } catch (err) {
+    app.log.error({ err }, 'Seismic sync failed')
+  }
+})
+
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
 await mongoose.connect(MONGO_URI)
@@ -67,6 +77,10 @@ syncForecasts(app.log)
 syncWarnings(app.log)
   .then(r => app.log.info({ r }, 'Initial warnings sync done'))
   .catch(err => app.log.error({ err }, 'Initial warnings sync failed'))
+
+syncSeismic(app.log)
+  .then(r => app.log.info({ r }, 'Initial seismic sync done'))
+  .catch(err => app.log.error({ err }, 'Initial seismic sync failed'))
 
 await app.listen({ port: PORT, host: '0.0.0.0' })
 app.log.info(`${SERVICE_NAME} listening on port ${PORT}`)

@@ -1,6 +1,14 @@
 import { Forecast } from './models/forecast.js'
 import { Warning } from './models/warning.js'
+import { Earthquake } from './models/earthquake.js'
 import { fetchAllLocations } from './sync.js'
+import {
+  AREA_BY_REGION,
+  QueryError,
+  buildSeismicQuery,
+  formatSeismicEvent,
+  parseSeismicPagination
+} from './seismic.js'
 
 // In-memory cache for locations (refreshed on first request)
 let _locationsCache = null
@@ -185,5 +193,103 @@ export async function ipmaRoutes(app) {
         region:    w.region
       }))
     }
+  })
+
+  const seismicQuerystring = {
+    type: 'object',
+    properties: {
+      region:        { type: 'string', enum: ['acores', 'continente-madeira'] },
+      min_magnitude: { type: 'number', description: 'Minimum magnitude' },
+      desde:         { type: 'string', description: 'Start of time window (ISO 8601)' },
+      ate:           { type: 'string', description: 'End of time window (ISO 8601)' },
+      sensed:        { type: 'boolean', description: 'Only events felt by the population' },
+      near:          { type: 'string', description: 'lat,lon of search centre' },
+      radius_km:     { type: 'number', description: 'Search radius in km (max 500)', maximum: 500 },
+      limit:         { type: 'integer', default: 100, minimum: 1, maximum: 1000 },
+      offset:        { type: 'integer', default: 0, minimum: 0 }
+    }
+  }
+
+  // GET /ipma/seismic/latest — must be registered before /seismic/:id
+  app.get('/seismic/latest', {
+    schema: {
+      description: 'Latest seismic event per region, plus last activity timestamp',
+      tags: ['Seismic'],
+      querystring: {
+        type: 'object',
+        properties: {
+          region: { type: 'string', enum: ['acores', 'continente-madeira'] }
+        }
+      }
+    }
+  }, async (req, reply) => {
+    if (req.query.region && !AREA_BY_REGION[req.query.region]) {
+      return reply.code(400).send({ error: 'Invalid region, expected acores or continente-madeira' })
+    }
+    const regions = req.query.region
+      ? [req.query.region]
+      : ['acores', 'continente-madeira']
+
+    const data = {}
+    const last_activity = {}
+    await Promise.all(regions.map(async (region) => {
+      const event = await Earthquake.findOne({ region }).sort({ time: -1 }).lean()
+      data[region] = formatSeismicEvent(event)
+      last_activity[region] = event?.time ?? null
+    }))
+
+    return { last_activity, data }
+  })
+
+  // GET /ipma/seismic — filterable catalogue (default last 30 days)
+  app.get('/seismic', {
+    schema: {
+      description: 'Seismic events in Portugal (Açores, Continente and Madeira). Default window is the last 30 days; history is retained.',
+      tags: ['Seismic'],
+      querystring: seismicQuerystring
+    }
+  }, async (req, reply) => {
+    let filter
+    try {
+      filter = buildSeismicQuery(req.query)
+    } catch (err) {
+      if (err instanceof QueryError) {
+        return reply.code(err.statusCode).send({ error: err.message })
+      }
+      throw err
+    }
+
+    const { limit, offset } = parseSeismicPagination(req.query)
+    const [total, docs] = await Promise.all([
+      Earthquake.countDocuments(filter),
+      Earthquake.find(filter).sort({ time: -1 }).skip(offset).limit(limit).lean()
+    ])
+
+    return {
+      count: docs.length,
+      total,
+      data:  docs.map(formatSeismicEvent)
+    }
+  })
+
+  // GET /ipma/seismic/:id — single event
+  app.get('/seismic/:id', {
+    schema: {
+      description: 'Single seismic event by id (IPMA sismoId or generated event key)',
+      tags: ['Seismic'],
+      params: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' }
+        },
+        required: ['id']
+      }
+    }
+  }, async (req, reply) => {
+    const doc = await Earthquake.findOne({ event_key: req.params.id }).lean()
+    if (!doc) {
+      return reply.code(404).send({ error: `Seismic event ${req.params.id} not found` })
+    }
+    return formatSeismicEvent(doc)
   })
 }
