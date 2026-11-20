@@ -133,34 +133,57 @@ export async function syncForecasts(logger) {
   return { synced: total, skipped, locations: locationMap.size }
 }
 
+// IPMA's warnings_www.json has no `id`: one row per (area, type, period).
+// The area must be part of the key, or all areas sharing a type and period
+// collapse into a single document (this is why only ~7 areas showed up).
+export function warningDocId(w) {
+  if (w.id || w.idCif) return w.id || w.idCif
+  const area = w.idAreaAviso || w.region || ''
+  return `${area}|${w.awarenessTypeName || w.type}|${w.startTime}|${w.endTime}`
+}
+
+// The level arrives as `awarenessLevelID` (green | yellow | orange | red).
+export function mapWarning(w, syncedAt = new Date()) {
+  return {
+    id:        warningDocId(w),
+    aware_id:  w.awarenessTypeName || w.type,
+    level:     w.awarenessLevelID || w.awarenessLevel || w.level || null,
+    type:      w.awarenessTypeName || w.type,
+    text:      w.text || w.descricaoAviso || '',
+    startTime: w.startTime ? new Date(w.startTime) : null,
+    endTime:   w.endTime ? new Date(w.endTime) : null,
+    region:    w.idAreaAviso || w.region || '',
+    synced_at: syncedAt
+  }
+}
+
 export async function syncWarnings(logger) {
   try {
     const url = `${BASE_URL}/forecast/warnings/warnings_www.json`
     const data = await fetchJson(url)
     const warnings = Array.isArray(data) ? data : (data.data || [])
 
+    const runStart = new Date()
     let upserted = 0
     for (const w of warnings) {
-      const docId = w.id || w.idCif || `${w.awarenessTypeName}-${w.startTime}-${w.endTime}`
+      const doc = mapWarning(w)
       await Warning.findOneAndUpdate(
-        { id: docId },
-        {
-          id:        docId,
-          aware_id:  w.awarenessTypeName || w.type,
-          level:     w.awarenessLevel || w.level,
-          type:      w.awarenessTypeName || w.type,
-          text:      w.text || w.descricaoAviso || '',
-          startTime: w.startTime ? new Date(w.startTime) : null,
-          endTime:   w.endTime ? new Date(w.endTime) : null,
-          region:    w.idAreaAviso || w.region || '',
-          synced_at: new Date()
-        },
+        { id: doc.id },
+        doc,
         { upsert: true, new: true }
       )
       upserted++
     }
-    logger?.info(`Synced ${upserted} warnings`)
-    return { synced: upserted }
+
+    // Drop rows IPMA no longer publishes (lifted warnings, old id scheme).
+    // Only after a non-empty successful pass, so an empty feed never wipes the table.
+    let removed = 0
+    if (warnings.length > 0) {
+      const res = await Warning.deleteMany({ synced_at: { $lt: runStart } })
+      removed = res.deletedCount || 0
+    }
+    logger?.info(`Synced ${upserted} warnings, removed ${removed} stale`)
+    return { synced: upserted, removed }
   } catch (err) {
     logger?.error({ err }, 'Failed to sync warnings')
     return { error: err.message }
