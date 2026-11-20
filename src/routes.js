@@ -1,5 +1,6 @@
 import { Forecast } from './models/forecast.js'
 import { Warning } from './models/warning.js'
+import { buildWarningQuery } from './warnings-query.js'
 import { Earthquake } from './models/earthquake.js'
 import { fetchAllLocations } from './sync.js'
 import {
@@ -166,16 +167,13 @@ export async function ipmaRoutes(app) {
         type: 'object',
         properties: {
           level:  { type: 'string', description: 'Filter by level (e.g. yellow, orange, red)' },
-          region: { type: 'string', description: 'Filter by region code' }
+          region: { type: 'string', description: 'Filter by region code (e.g. CBO = Castelo Branco district)' },
+          active: { type: 'boolean', description: 'true: only warnings in force now. Default: not yet ended (includes upcoming)' }
         }
       }
     }
   }, async (req) => {
-    const now = new Date()
-    const query = { endTime: { $gte: now } }
-
-    if (req.query.level)  query.level  = new RegExp(req.query.level, 'i')
-    if (req.query.region) query.region = new RegExp(req.query.region, 'i')
+    const query = buildWarningQuery(req.query, new Date())
 
     const warnings = await Warning.find(query)
       .sort({ level: -1, startTime: 1 })
