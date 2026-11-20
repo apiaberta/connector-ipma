@@ -1,0 +1,6 @@
+[
+  {"text": "Chuva persistente, por vezes forte.", "awarenessTypeName": "Precipitação", "idAreaAviso": "CBO", "startTime": "2026-11-21T06:00:00", "awarenessLevelID": "yellow", "endTime": "2026-11-21T18:00:00"},
+  {"text": "", "awarenessTypeName": "Nevoeiro", "idAreaAviso": "CBO", "startTime": "2026-11-20T00:50:00", "awarenessLevelID": "green", "endTime": "2026-11-23T00:00:00"},
+  {"text": "Chuva persistente, por vezes forte.", "awarenessTypeName": "Precipitação", "idAreaAviso": "CBR", "startTime": "2026-11-21T06:00:00", "awarenessLevelID": "orange", "endTime": "2026-11-21T18:00:00"},
+  {"text": "", "awarenessTypeName": "Nevoeiro", "idAreaAviso": "CBR", "startTime": "2026-11-20T00:50:00", "awarenessLevelID": "green", "endTime": "2026-11-23T00:00:00"}
+]
